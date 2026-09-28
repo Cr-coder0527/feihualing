@@ -662,16 +662,15 @@ var PAIRMAP = {};  // 相邻两句 -> 出处
 })();
 var ALL_SEGS = Object.keys(SEGMAP);
 
-/* ================= 排行榜存储（LeanCloud 全站共享 + 本机兜底） ================= */
+/* ================= 排行榜存储（Supabase 全站共享 + 本机兜底） ================= */
 var BOARD_KEY = 'feihua_board_v1';     // 本机兜底记录（离线可用）
 var CLOUD_CACHE = 'feihua_cloud_v1';   // 最近一次云端榜单快照
 var NAME_KEY = 'feihua_name_v1';
-var CLOUD = {
-  id: '',     // LeanCloud AppID
-  key: '',    // LeanCloud AppKey
-  host: ''    // REST API 域名，形如 https://xxxx.api.lncldglobal.com
+var SUPA = {
+  url: 'https://ubsutakcgwtyxuogtsry.supabase.co',   // Supabase Project URL
+  key: 'sb_publishable_JTQCuEjuISOf_W0fkJqkpA_edCAwnXa'   // publishable key（公开安全，受 RLS 行级安全保护）
 };
-function cloudOk() { return !!(CLOUD.id && CLOUD.key && CLOUD.host); }
+function cloudOk() { return !!(SUPA.url && SUPA.key); }
 
 function getBoard() {
   try { return JSON.parse(localStorage.getItem(BOARD_KEY) || '[]'); } catch (e) { return []; }
@@ -689,8 +688,14 @@ function addRecord(rec) {
   return { list: list, id: rec.id };
 }
 
-function lcHeaders() {
-  return { 'X-LC-Id': CLOUD.id, 'X-LC-Key': CLOUD.key, 'Content-Type': 'application/json' };
+function sbHeaders(extra) {
+  var h = {
+    'apikey': SUPA.key,
+    'Authorization': 'Bearer ' + SUPA.key,
+    'Content-Type': 'application/json'
+  };
+  if (extra) for (var k in extra) h[k] = extra[k];
+  return h;
 }
 
 // 合并云端与本机记录（按 id 去重、分数降序、取前 20）
@@ -709,36 +714,35 @@ function mergeLists(a, b) {
 
 // 拉取云端榜单前 20（失败抛错，由调用方兜底）
 function fetchCloudBoard() {
-  return fetch(CLOUD.host + '/1.1/classes/FeihuaScore?order=-score&limit=20&count=1', { headers: lcHeaders() })
+  return fetch(SUPA.url + '/rest/v1/feihua_score?select=*&order=score.desc&limit=20', { headers: sbHeaders() })
     .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
-    .then(function (data) {
-      var list = (data.results || []).map(function (r) {
-        return { id: r.objectId, name: r.name || '无名诗人', score: r.score | 0, kw: r.kw || '', rounds: r.rounds | 0, date: r.date || '', _new: r.objectId === window.__newObjectId };
+    .then(function (rows) {
+      var list = rows.map(function (r) {
+        return { id: r.id, name: r.name || '无名诗人', score: r.score | 0, kw: r.kw || '', rounds: r.rounds | 0, date: r.date || '', _new: r.id === window.__newRecordId };
       });
       var merged = mergeLists(list, getBoard());
       try { localStorage.setItem(CLOUD_CACHE, JSON.stringify(merged)); } catch (e) {}
-      return { list: merged, cloud: true, total: data.count || list.length };
+      return { list: merged, cloud: true, total: list.length };
     });
 }
 
-// 上传一条成绩到云端，返回带 objectId 的记录
+// 上传一条成绩到云端，返回带 id 的记录
 function submitCloudRecord(rec) {
-  return fetch(CLOUD.host + '/1.1/classes/FeihuaScore', {
+  return fetch(SUPA.url + '/rest/v1/feihua_score', {
     method: 'POST',
-    headers: lcHeaders(),
-    body: JSON.stringify({ name: rec.name, score: rec.score, kw: rec.kw, rounds: rec.rounds, date: rec.date })
+    headers: sbHeaders({ 'Prefer': 'return=representation' }),
+    body: JSON.stringify([{ name: rec.name, score: rec.score, kw: rec.kw, rounds: rec.rounds, date: rec.date }])
   }).then(function (res) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.json();
-  }).then(function (data) { rec.id = data.objectId; return rec; });
+  }).then(function (rows) { rec.id = rows[0].id; return rec; });
 }
 
 // 查询云端真实名次：分数更高的记录数 + 1
 function fetchCloudRank(score) {
-  var where = encodeURIComponent(JSON.stringify({ score: { $gt: score } }));
-  return fetch(CLOUD.host + '/1.1/classes/FeihuaScore?count=1&limit=0&where=' + where, { headers: lcHeaders() })
+  return fetch(SUPA.url + '/rest/v1/feihua_score?select=id&score=gt.' + score, { headers: sbHeaders() })
     .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
-    .then(function (d) { return (d.count || 0) + 1; });
+    .then(function (rows) { return Math.min(rows.length, 1000) + 1; });
 }
 
 /* ================= 游戏状态 ================= */
@@ -977,7 +981,7 @@ function endGame(win) {
       setRankHint('成绩上传中…');
       submitCloudRecord({ name: name, score: G.score, kw: G.kw, rounds: G.rounds, date: dateStr })
         .then(function (saved) {
-          window.__newObjectId = saved.id;
+          window.__newRecordId = saved.id;
           return fetchCloudRank(G.score);
         })
         .then(function (rank) {
@@ -1136,7 +1140,7 @@ function bindEvents() {
     saveBoard([]);
     try { localStorage.removeItem(CLOUD_CACHE); } catch (e) {}
     window.__lastRecordId = null;
-    window.__newObjectId = null;
+    window.__newRecordId = null;
     openBoard();
   });
 
